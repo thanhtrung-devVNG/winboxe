@@ -2,8 +2,8 @@
 set -euo pipefail
 
 # ════════════════════════════════════════════════════════════════
-#  WINBOX - Web Dashboard Edition v2
-#  Fix: associative array keys, thêm Start/Stop/Delete VM
+#  WINBOX v3 - 4 Chức năng: Start | Stop | Delete | Create
+#  Fix: Xóa VM nền không dừng tool, dashboard tách biệt hoàn toàn
 # ════════════════════════════════════════════════════════════════
 
 HOME="${HOME:-/root}"
@@ -20,7 +20,7 @@ _rl_warn() { echo -e "${Y}⚠${W}  $1"; }
 _rl_info() { echo -e "${B}ℹ${W}  $1"; }
 
 # ════════════════════════════════════════════════════════════════
-#  INSTANCE & PATHS
+#  PATHS & STATE
 # ════════════════════════════════════════════════════════════════
 INSTANCE_ID=1
 WINVM_RDP_PORT=$((3388 + INSTANCE_ID))
@@ -31,9 +31,10 @@ WIN_IMG_PATH="${PWD}/win.img"
 WEB_PORT=8080
 WEB_DIR="/tmp/winbox-web"
 WEB_PID_FILE="/tmp/winbox-web.pid"
+WINBOX_STATE="/tmp/winbox-state.json"
 
 # ════════════════════════════════════════════════════════════════
-#  ISO CONFIG (dùng indexed arrays thay vì associative)
+#  ISO CONFIG (indexed arrays)
 # ════════════════════════════════════════════════════════════════
 ISO_URL_1="https://archive.org/download/tamnguyen-2012r2/2012.img"
 ISO_URL_2="https://archive.org/download/tamnguyen-2022/2022.img"
@@ -70,12 +71,477 @@ ISO_UEFI_4="no"
 ISO_UEFI_5="no"
 ISO_UEFI_6="no"
 
-# Helper lấy giá trị ISO theo index
 _get_iso_url()  { eval echo "\$ISO_URL_$1"; }
 _get_iso_name() { eval echo "\$ISO_NAME_$1"; }
 _get_iso_user() { eval echo "\$ISO_USER_$1"; }
 _get_iso_pass() { eval echo "\$ISO_PASS_$1"; }
 _get_iso_uefi() { eval echo "\$ISO_UEFI_$1"; }
+
+# ════════════════════════════════════════════════════════════════
+#  VM STATUS HELPERS
+# ════════════════════════════════════════════════════════════════
+_vm_running() {
+    if [[ ! -f "$WINVM_PID_FILE" ]]; then return 1; fi
+    local pid; pid=$(cat "$WINVM_PID_FILE" 2>/dev/null || echo "")
+    [[ -z "$pid" ]] && return 1
+    kill -0 "$pid" 2>/dev/null && return 0 || return 1
+}
+
+_vm_info() {
+    if [[ ! -f "$WINBOX_STATE" ]]; then
+        echo -e "${Y}⚠${W}  Chưa có VM nào được tạo"
+        return 1
+    fi
+    local iso cpu ram
+    iso=$(python3 -c "import json; d=json.load(open('$WINBOX_STATE')); print(str(d.get('iso','?')))" 2>/dev/null || echo "?")
+    cpu=$(python3 -c "import json; d=json.load(open('$WINBOX_STATE')); print(str(d.get('cpu','?')))" 2>/dev/null || echo "?")
+    ram=$(python3 -c "import json; d=json.load(open('$WINBOX_STATE')); print(str(d.get('ram','?')))" 2>/dev/null || echo "?")
+    local name user pass
+    name=$(_get_iso_name "$iso")
+    user=$(_get_iso_user "$iso")
+    pass=$(_get_iso_pass "$iso")
+    echo ""
+    echo -e "${C}══════════════════════════════════════════════${W}"
+    echo -e "${C}📋 THÔNG TIN VM${W}"
+    echo -e "${C}══════════════════════════════════════════════${W}"
+    echo -e "🪟 OS        : ${Y}${name}${W}"
+    echo -e "⚙️  CPU      : ${B}${cpu}${W} cores"
+    echo -e "💾 RAM       : ${B}${ram}${W} GB"
+    echo -e "📡 RDP       : ${G}localhost:${WINVM_RDP_PORT}${W}"
+    echo -e "👤 Username  : ${Y}${user}${W}"
+    echo -e "🔑 Password  : ${Y}${pass}${W}"
+    echo -e "🖥️  VNC       : ${G}:5900${W}"
+    if _vm_running; then
+        echo -e "🟢 Status    : ${G}RUNNING${W}"
+    else
+        echo -e "🔴 Status    : ${R}STOPPED${W}"
+    fi
+    echo -e "${C}══════════════════════════════════════════════${W}"
+}
+
+# ════════════════════════════════════════════════════════════════
+#  1. START VM
+# ════════════════════════════════════════════════════════════════
+_start_vm() {
+    echo ""
+    echo -e "${C}════════════════════════════════════${W}"
+    echo -e "${C}▶️  START VM${W}"
+    echo -e "${C}════════════════════════════════════${W}"
+
+    if _vm_running; then
+        _rl_warn "VM đang chạy rồi!"
+        _vm_info
+        return 0
+    fi
+
+    if [[ ! -f "$WINBOX_STATE" ]]; then
+        _rl_warn "Chưa có VM nào. Hãy chọn [4] Create VM trước."
+        return 1
+    fi
+
+    # Đọc config từ state
+    local iso cpu ram preset
+    iso=$(python3 -c "import json; d=json.load(open('$WINBOX_STATE')); print(str(d.get('iso','5')))" 2>/dev/null || echo "5")
+    preset=$(python3 -c "import json; d=json.load(open('$WINBOX_STATE')); print(str(d.get('preset','1')))" 2>/dev/null || echo "1")
+    cpu=$(python3 -c "import json; d=json.load(open('$WINBOX_STATE')); print(str(d.get('cpu','4')))" 2>/dev/null || echo "4")
+    ram=$(python3 -c "import json; d=json.load(open('$WINBOX_STATE')); print(str(d.get('ram','4')))" 2>/dev/null || echo "4")
+
+    if [[ "$preset" == "4" ]]; then
+        cpu_core="$cpu"
+        ram_size="$ram"
+    else
+        case "$preset" in
+            1) cpu_core=4;  ram_size=4 ;;
+            2) cpu_core=8;  ram_size=8 ;;
+            3) cpu_core=16; ram_size=16 ;;
+            *) cpu_core=4;  ram_size=4 ;;
+        esac
+    fi
+
+    local win_name win_url use_uefi rdp_user rdp_pass
+    win_name=$(_get_iso_name "$iso")
+    win_url=$(_get_iso_url "$iso")
+    use_uefi=$(_get_iso_uefi "$iso")
+    rdp_user=$(_get_iso_user "$iso")
+    rdp_pass=$(_get_iso_pass "$iso")
+
+    # Kiểm tra image
+    if [[ ! -f "$WIN_IMG_PATH" ]]; then
+        _rl_warn "Không tìm thấy $WIN_IMG_PATH"
+        _rl_info "Chạy [4] Create VM để tải image"
+        return 1
+    fi
+
+    # Detect KVM
+    local kvm_avail=0 kvm_mode="tcg"
+    if [[ -e /dev/kvm ]] && grep -qE '(vmx|svm)' /proc/cpuinfo 2>/dev/null; then
+        if [[ "$(id -u)" == "0" ]]; then
+            kvm_avail=1; kvm_mode="kvm"
+        else
+            local grp=$(ls -l /dev/kvm 2>/dev/null | awk '{print $4}')
+            if id -Gn | grep -qw "$grp"; then
+                kvm_avail=1; kvm_mode="kvm"
+            fi
+        fi
+    fi
+
+    # Resolve QEMU
+    local qemu_bin=""
+    for q in "${QEMU_BIN:-}" "$HOME/qemu-static/bin/qemu-system-x86_64" "$HOME/qemu-optimized/bin/qemu-system-x86_64" "/opt/qemu-optimized/bin/qemu-system-x86_64" "$(command -v qemu-system-x86_64 2>/dev/null)"; do
+        [[ -n "$q" && -x "$q" ]] && { qemu_bin="$q"; break; }
+    done
+    [[ -z "$qemu_bin" ]] && { _rl_warn "Không tìm thấy QEMU"; return 1; }
+
+    # TCG tuning
+    local cpu_model=""
+    if [[ "$kvm_avail" == "0" ]]; then
+        export MALLOC_ARENA_MAX=4
+        export MALLOC_MMAP_THRESHOLD_=131072
+        export QEMU_AUDIO_DRV=none
+        local host_ram_gb; host_ram_gb=$(awk '/MemTotal/{printf "%.0f",$2/1024/1024}' /proc/meminfo)
+        [[ "${host_ram_gb:-0}" -lt 1 ]] && host_ram_gb=4
+        local tcg_tb_mb; tcg_tb_mb=$(( host_ram_gb * 1024 * 6 / 100 ))
+        [[ "$tcg_tb_mb" -lt 4096  ]] && tcg_tb_mb=4096
+        [[ "$tcg_tb_mb" -gt 8192 ]] && tcg_tb_mb=8192
+        _rl_info "TCG TB cache: ${tcg_tb_mb}MB"
+        local raw_cpu vendor
+        raw_cpu=$(grep -m1 "model name" /proc/cpuinfo 2>/dev/null | sed 's/^.*: //' || echo "")
+        vendor=$(grep -m1 "vendor_id" /proc/cpuinfo 2>/dev/null | awk '{print $NF}' || echo "")
+        local cpu_model_id
+        if [[ -n "$raw_cpu" && "$raw_cpu" != "unknown" ]]; then
+            cpu_model_id=$(printf '%s' "$raw_cpu" | tr ',' ' ' | tr -d '"\@#$%^&*|<>' | sed 's/[[:space:]]\+/ /g; s/^[[:space:]]*//; s/[[:space:]]*$//' | cut -c1-48)
+        else
+            case "$vendor" in
+                GenuineIntel) cpu_model_id="Intel Xeon Processor" ;;
+                AuthenticAMD) cpu_model_id="AMD EPYC Processor" ;;
+                *) cpu_model_id="Generic x86_64 Processor" ;;
+            esac
+        fi
+        local cpu_extra=""
+        grep -q ssse3  /proc/cpuinfo && cpu_extra="$cpu_extra,+ssse3"
+        grep -q sse4_1 /proc/cpuinfo && cpu_extra="$cpu_extra,+sse4.1"
+        grep -q sse4_2 /proc/cpuinfo && cpu_extra="$cpu_extra,+sse4.2"
+        grep -q ' avx ' /proc/cpuinfo && cpu_extra="$cpu_extra,+avx"
+        grep -q avx2   /proc/cpuinfo && cpu_extra="$cpu_extra,+avx2"
+        cpu_model="max,hypervisor=off,tsc=on,pmu=off,l3-cache=on,+cmov,+mmx,+fxsr,+sse2,+cx16,+x2apic,+sep,+pat,+pse,+aes,+popcnt,-tsc-deadline${cpu_extra},model-id=${cpu_model_id}"
+    fi
+
+    # OVMF
+    local ovmf_path=""
+    if [[ "$use_uefi" == "yes" ]]; then
+        for _ovmf in /usr/share/qemu/OVMF.fd /usr/share/ovmf/OVMF.fd /usr/share/OVMF/OVMF_CODE.fd; do
+            [[ -f "$_ovmf" ]] && { ovmf_path="$_ovmf"; break; }
+        done
+        if [[ -z "$ovmf_path" && -f /tmp/ovmf/OVMF.fd ]]; then
+            ovmf_path="/tmp/ovmf/OVMF.fd"
+        fi
+    fi
+
+    # Build QEMU command
+    rm -f "$WINVM_QMP_SOCK"
+    local qemu_cmd=()
+    local net_device=""
+
+    if [[ "$kvm_avail" == "1" ]]; then
+        qemu_cmd=("$qemu_bin" -machine q35,hpet=off -cpu host -smp "$cpu_core" -m "${ram_size}G" -accel kvm -rtc base=localtime,clock=host)
+        net_device="-device virtio-net-pci,netdev=n0"
+        _rl_ok "KVM mode: hardware acceleration"
+    else
+        qemu_cmd=("$qemu_bin" -machine q35,hpet=off,vmport=off,mem-merge=off -cpu "$cpu_model" -smp "$cpu_core,cores=$cpu_core,threads=1,sockets=1" -m "${ram_size}G" -accel "tcg,thread=multi,split-wx=off,one-insn-per-tb=off,tb-size=$tcg_tb_mb" -rtc base=localtime -overcommit cpu-pm=on -boot order=c,strict=on -no-shutdown -device virtio-mouse-pci -device virtio-keyboard-pci -nodefaults -smbios type=1,manufacturer="Dell Inc.",product="PowerEdge R640" -no-user-config)
+        net_device="-device virtio-net-pci,netdev=n0"
+        _rl_warn "TCG mode: software emulation"
+    fi
+
+    [[ -n "$ovmf_path" ]] && qemu_cmd+=(-bios "$ovmf_path")
+
+    qemu_cmd+=(-drive "file=$WIN_IMG_PATH,if=none,id=disk0,cache=unsafe,aio=threads,format=raw" -device virtio-blk-pci,drive=disk0,iothread=io1,num-queues=4,queue-size=256 -object iothread,id=io1)
+    qemu_cmd+=(-netdev "user,id=n0,hostfwd=tcp::${WINVM_RDP_PORT}-:3389" $net_device)
+    qemu_cmd+=(-vga virtio -vnc :0 -device nec-usb-xhci -device usb-tablet)
+    [[ -e /dev/urandom ]] && qemu_cmd+=(-object rng-random,filename=/dev/urandom,id=rng0 -device virtio-rng-pci,rng=rng0)
+    qemu_cmd+=(-qmp "unix:$WINVM_QMP_SOCK,server,nowait")
+
+    # Launch
+    echo -e "${B}ℹ${W}  Khởi động ${win_name}..."
+    local qemu_log="/tmp/qemu-launch-$$.log"
+    nohup "${qemu_cmd[@]}" >> "$qemu_log" 2>&1 &
+    local qemu_pid=$!
+    echo "$qemu_pid" > "$WINVM_PID_FILE"
+    disown "$qemu_pid"
+
+    sleep 4
+    if kill -0 "$qemu_pid" 2>/dev/null; then
+        _rl_ok "VM đã khởi động (PID: $qemu_pid)"
+        _vm_info
+    else
+        _rl_warn "VM KHÔNG khởi động được!"
+        cat "$qemu_log" 2>/dev/null || true
+        return 1
+    fi
+}
+
+# ════════════════════════════════════════════════════════════════
+#  2. STOP VM
+# ════════════════════════════════════════════════════════════════
+_stop_vm() {
+    echo ""
+    echo -e "${C}════════════════════════════════════${W}"
+    echo -e "${C}⏹️  STOP VM${W}"
+    echo -e "${C}════════════════════════════════════${W}"
+
+    if ! _vm_running; then
+        _rl_warn "VM không chạy"
+        return 0
+    fi
+
+    local pid; pid=$(cat "$WINVM_PID_FILE" 2>/dev/null || echo "")
+    if [[ -n "$pid" ]]; then
+        kill "$pid" 2>/dev/null || true
+        sleep 2
+        kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null || true
+    fi
+    pkill -f 'qemu-system-x86_64' 2>/dev/null || true
+    rm -f "$WINVM_PID_FILE" "$WINVM_QMP_SOCK" "$WINVM_STATE_FILE"
+    _rl_ok "VM đã dừng"
+}
+
+# ════════════════════════════════════════════════════════════════
+#  3. DELETE VM (xóa nền, không dừng tool)
+# ════════════════════════════════════════════════════════════════
+_delete_vm() {
+    echo ""
+    echo -e "${C}════════════════════════════════════${W}"
+    echo -e "${C}🗑️  DELETE VM${W}"
+    echo -e "${C}════════════════════════════════════${W}"
+
+    echo -e "${Y}⚠${W}  Bạn có chắc muốn XÓA VM?"
+    echo -e "   - Dừng VM nếu đang chạy"
+    echo -e "   - Xóa file win.img"
+    echo -e "   - Xóa toàn bộ state"
+    echo -e "   - ${R}KHÔNG THỂ HOÀN TÁC${W}"
+    echo ""
+    read -rp "Nhập 'yes' để xác nhận xóa: " confirm
+    if [[ "$confirm" != "yes" ]]; then
+        _rl_info "Đã hủy xóa VM"
+        return 0
+    fi
+
+    # Xóa nền bằng subshell — không block terminal
+    (
+        # Dừng VM
+        if [[ -f "$WINVM_PID_FILE" ]]; then
+            local pid; pid=$(cat "$WINVM_PID_FILE" 2>/dev/null || echo "")
+            [[ -n "$pid" ]] && { kill "$pid" 2>/dev/null; sleep 2; kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null || true; }
+        fi
+        pkill -f 'qemu-system-x86_64' 2>/dev/null || true
+        rm -f "$WINVM_PID_FILE" "$WINVM_QMP_SOCK" "$WINVM_STATE_FILE"
+
+        # Xóa image
+        [[ -f "$WIN_IMG_PATH" ]] && rm -f "$WIN_IMG_PATH"
+
+        # Xóa state & logs
+        rm -f "$WINBOX_STATE" /tmp/qemu-launch.log /tmp/winbox-state.json /tmp/winbox-web.log 2>/dev/null || true
+
+        # Xóa web files
+        rm -rf "$WEB_DIR" 2>/dev/null || true
+        if [[ -f "$WEB_PID_FILE" ]]; then
+            local wp; wp=$(cat "$WEB_PID_FILE" 2>/dev/null || echo "")
+            [[ -n "$wp" ]] && kill "$wp" 2>/dev/null || true
+            rm -f "$WEB_PID_FILE"
+        fi
+    ) &
+    local delete_pid=$!
+    disown $delete_pid
+
+    _rl_ok "Đang xóa VM nền (PID: $delete_pid)"
+    _rl_info "Bạn có thể tiếp tục sử dụng menu ngay bây giờ"
+    sleep 1
+}
+
+# ════════════════════════════════════════════════════════════════
+#  4. CREATE VM (tạo mới — tải image + lưu config)
+# ════════════════════════════════════════════════════════════════
+_create_vm() {
+    echo ""
+    echo -e "${C}════════════════════════════════════${W}"
+    echo -e "${C}🔧 CREATE VM${W}"
+    echo -e "${C}════════════════════════════════════${W}"
+
+    # Dừng VM cũ nếu đang chạy
+    if _vm_running; then
+        _rl_warn "VM đang chạy — đang dừng trước khi tạo mới..."
+        _stop_vm
+        sleep 1
+    fi
+
+    # Xóa image cũ nếu có
+    if [[ -f "$WIN_IMG_PATH" ]]; then
+        _rl_warn "Đã xóa image cũ"
+        rm -f "$WIN_IMG_PATH"
+    fi
+
+    # Khởi động web dashboard để chọn config
+    _start_web_server
+    _wait_web_config || {
+        _rl_warn "Không nhận được config. Thoát."
+        return 1
+    }
+
+    # Đọc config từ state
+    local win_choice cpu_core ram_size
+    win_choice=$(python3 -c "import json; d=json.load(open('$WINBOX_STATE')); print(str(d.get('iso','5')).strip())" 2>/dev/null || echo "5")
+    local _preset=$(python3 -c "import json; d=json.load(open('$WINBOX_STATE')); print(str(d.get('preset','1')).strip())" 2>/dev/null || echo "1")
+    local _cpu=$(python3 -c "import json; d=json.load(open('$WINBOX_STATE')); print(str(d.get('cpu','4')).strip())" 2>/dev/null || echo "4")
+    local _ram=$(python3 -c "import json; d=json.load(open('$WINBOX_STATE')); print(str(d.get('ram','4')).strip())" 2>/dev/null || echo "4")
+
+    if [[ "$_preset" == "4" ]]; then
+        cpu_core="$_cpu"
+        ram_size="$_ram"
+    else
+        case "$_preset" in
+            1) cpu_core=4;  ram_size=4 ;;
+            2) cpu_core=8;  ram_size=8 ;;
+            3) cpu_core=16; ram_size=16 ;;
+            *) cpu_core=4;  ram_size=4 ;;
+        esac
+    fi
+
+    case "$win_choice" in
+        1|2|3|4|5|6) : ;;
+        *) win_choice=5 ;;
+    esac
+
+    local win_name win_url use_uefi rdp_user rdp_pass
+    win_name=$(_get_iso_name "$win_choice")
+    win_url=$(_get_iso_url "$win_choice")
+    use_uefi=$(_get_iso_uefi "$win_choice")
+    rdp_user=$(_get_iso_user "$win_choice")
+    rdp_pass=$(_get_iso_pass "$win_choice")
+
+    echo -e "${G}✔${W} Config nhận được:"
+    echo -e "   🖥️  CPU: ${B}$cpu_core${W} cores"
+    echo -e "   💾 RAM: ${B}$ram_size${W} GB"
+    echo -e "   💿 ISO: ${B}$win_choice${W} — ${C}$win_name${W}"
+
+    # Detect apt
+    local apt_cmd="" apt_ok=0 rootless=0
+    if [[ "$(id -u)" == "0" ]] && apt-get update -qq >/dev/null 2>&1; then
+        apt_cmd="apt-get"; apt_ok=1
+    elif sudo -n true 2>/dev/null && sudo apt-get update -qq >/dev/null 2>&1; then
+        apt_cmd="sudo apt-get"; apt_ok=1
+    else
+        apt_ok=0; rootless=1
+    fi
+
+    # Bootstrap tools
+    local need=0
+    for t in wget curl python3; do command -v "$t" &>/dev/null || need=1; done
+    if [[ "$need" == "1" && -n "$apt_cmd" ]]; then
+        _rl_info "Cài công cụ cần thiết..."
+        export DEBIAN_FRONTEND=noninteractive
+        $apt_cmd update -qq >/dev/null 2>&1 || true
+        for pkg in wget curl python3 python3-pip; do
+            command -v "$pkg" &>/dev/null || $apt_cmd install -y -qq "$pkg" >/dev/null 2>&1 || true
+        done
+    fi
+
+    # Resolve QEMU
+    local qemu_bin="" qemu_img=""
+    for q in "${QEMU_BIN:-}" "$HOME/qemu-static/bin/qemu-system-x86_64" "$HOME/qemu-optimized/bin/qemu-system-x86_64" "/opt/qemu-optimized/bin/qemu-system-x86_64" "$(command -v qemu-system-x86_64 2>/dev/null)"; do
+        [[ -n "$q" && -x "$q" ]] && { qemu_bin="$q"; break; }
+    done
+
+    if [[ -z "$qemu_bin" ]]; then
+        if [[ "$rootless" == "1" || "$apt_ok" == "0" ]]; then
+            _rl_info "Tải QEMU AppImage..."
+            _rootless_build || { _rl_warn "Không thể có QEMU"; return 1; }
+            qemu_bin="$HOME/qemu-static/bin/qemu-system-x86_64"
+        else
+            _rl_info "Cài QEMU qua apt..."
+            $apt_cmd install -y -qq qemu-system-x86 qemu-utils 2>/dev/null || true
+            qemu_bin=$(command -v qemu-system-x86_64 2>/dev/null || echo "")
+            [[ -z "$qemu_bin" ]] && { _rl_warn "Không thể cài QEMU"; return 1; }
+        fi
+    fi
+
+    for qi in "$(dirname "${qemu_bin:-/nonexistent}")/qemu-img" "/usr/bin/qemu-img" "$(command -v qemu-img 2>/dev/null || true)"; do
+        if [[ -x "$qi" ]] && "$qi" --version >/dev/null 2>&1; then
+            qemu_img="$qi"; break
+        fi
+    done
+    [[ -z "$qemu_img" ]] && qemu_img="$(dirname "$qemu_bin")/qemu-img"
+
+    # Tải image
+    _img_valid() {
+        local f="$1"
+        [[ -f "$f" ]] || return 1
+        local sz; sz=$(stat -c%s "$f" 2>/dev/null || echo 0)
+        [[ "$sz" -ge 2147483648 ]] && return 0
+        return 1
+    }
+
+    if _img_valid "$WIN_IMG_PATH"; then
+        _rl_ok "Image đã có — bỏ qua tải"
+    else
+        echo ""
+        echo -e "${C}⬇  Đang tải: ${Y}${win_name}${W}"
+
+        # Ensure aria2
+        if ! command -v aria2c &>/dev/null; then
+            local _bin_dir="${PREFIX:-$HOME/qemu-static}/bin"
+            mkdir -p "$_bin_dir"
+            local _tmp_zip="/tmp/aria2-static-$$.zip"
+            if wget -q --no-check-certificate "https://github.com/abcfy2/aria2-static-build/releases/latest/download/aria2-x86_64-linux-musl_static.zip" -O "$_tmp_zip" 2>/dev/null; then
+                local _tmp_dir="/tmp/aria2-static-$$"
+                mkdir -p "$_tmp_dir"
+                if unzip -q "$_tmp_zip" -d "$_tmp_dir" 2>/dev/null; then
+                    local _aria2c; _aria2c=$(find "$_tmp_dir" -name "aria2c" -type f | head -1)
+                    if [[ -n "$_aria2c" ]]; then
+                        install -m755 "$_aria2c" "$_bin_dir/aria2c"
+                        export PATH="$_bin_dir:$PATH"
+                    fi
+                fi
+                rm -rf "$_tmp_zip" "$_tmp_dir"
+            fi
+            [[ -n "$apt_cmd" ]] && $apt_cmd install -y -qq aria2 >/dev/null 2>&1 || true
+        fi
+
+        if command -v aria2c &>/dev/null; then
+            aria2c --split=16 --max-connection-per-server=16 --min-split-size=1M --max-concurrent-downloads=16 --file-allocation=none --continue=true --check-certificate=false --max-tries=5 --retry-wait=3 --timeout=60 --connect-timeout=15 --piece-length=1M --human-readable=true --download-result=full --console-log-level=notice --summary-interval=3 "$win_url" -d "$(dirname "$WIN_IMG_PATH")" -o "$(basename "$WIN_IMG_PATH")"
+        else
+            wget --progress=bar:force --continue "$win_url" -O "$WIN_IMG_PATH"
+        fi
+
+        if _img_valid "$WIN_IMG_PATH"; then
+            _rl_ok "Tải xong"
+        else
+            _rl_warn "Tải thất bại hoặc file không hợp lệ"
+            return 1
+        fi
+    fi
+
+    # Resize disk
+    if [[ -n "$qemu_img" && -x "$qemu_img" ]]; then
+        _rl_info "Mở rộng disk +20GB..."
+        "$qemu_img" resize "$WIN_IMG_PATH" "+20G" 2>/dev/null || true
+    fi
+
+    # Tải OVMF nếu cần
+    if [[ "$use_uefi" == "yes" ]]; then
+        local ovmf_found=0
+        for _ovmf in /usr/share/qemu/OVMF.fd /usr/share/ovmf/OVMF.fd /usr/share/OVMF/OVMF_CODE.fd; do
+            [[ -f "$_ovmf" ]] && { ovmf_found=1; break; }
+        done
+        if [[ $ovmf_found -eq 0 ]]; then
+            _rl_info "Tải OVMF..."
+            mkdir -p /tmp/ovmf
+            wget -q -O /tmp/ovmf/OVMF.fd "https://github.com/nicowillis/ovmf-prebuilt/raw/main/OVMF.fd" 2>/dev/null || true
+        fi
+    fi
+
+    _rl_ok "Create VM hoàn tất!"
+    _rl_info "Chạy [1] Start VM để khởi động"
+    _vm_info
+}
 
 # ════════════════════════════════════════════════════════════════
 #  WEB DASHBOARD FILES
@@ -153,7 +619,7 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:linear-gradient(135d
 <div class="container">
 <div class="header"><h1>🪟 WinBox</h1><p>Windows VM Dashboard</p></div>
 
-<div class="vm-status stopped" id="vm-status">🔴 VM đang tắt</div>
+<div class="vm-status stopped" id="vm-status">🔴 VM chưa được tạo</div>
 
 <div class="section">
 <div class="section-title">⚙️ Cấu hình VM</div>
@@ -193,18 +659,16 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:linear-gradient(135d
 <div class="icon">🪟</div><div class="name">Win 10 LTSB 2015</div><div class="desc">Admin / Tam255Z</div>
 </div>
 <div class="option-card" data-iso="5" onclick="selectIso(5)">
-<div class="icon">🪟</div><div class="name">Win 10 LTSC 2023</div><div class="desc">Admin / Tam255Z</div>
+<div class="icon">🪟</div><div class="name">Win 10 LTSC 2023</div><div class="desc">Auto / Tam255Z</div>
 </div>
 <div class="option-card" data-iso="6" onclick="selectIso(6)">
-<div class="icon">🎮</div><div class="name">Win 10 LTSB 2022</div><div class="desc">Admin / Tam255Z | VirtGPU 3D</div>
+<div class="icon">🎮</div><div class="name">Win 10 LTSB 2022</div><div class="desc">Auto / Tam255Z | VirtGPU 3D</div>
 </div>
 </div>
 </div>
 
 <div class="btn-row">
-<button class="submit-btn" id="submit-btn" onclick="launchVM()" disabled>🚀 KHỞI ĐỘNG</button>
-<button class="submit-btn warning" id="stop-btn" onclick="stopVM()" disabled>⏹️ DỪNG</button>
-<button class="submit-btn danger" id="delete-btn" onclick="deleteVM()">🗑️ XÓA</button>
+<button class="submit-btn" id="submit-btn" onclick="createVM()" disabled>✅ TẠO VM</button>
 </div>
 
 <div class="status loading" id="status-loading">
@@ -216,21 +680,9 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:linear-gradient(135d
 
 <div class="status success" id="status-success">
 <div style="font-size:1.8em;margin-bottom:8px">✅</div>
-<div style="font-size:1.2em;font-weight:700;margin-bottom:5px">VM đã sẵn sàng!</div>
-<div style="color:#8892b0;margin-bottom:12px;font-size:0.9em">Kết nối RDP bằng thông tin bên dưới</div>
+<div style="font-size:1.2em;font-weight:700;margin-bottom:5px">Đã lưu cấu hình!</div>
+<div style="color:#8892b0;margin-bottom:12px;font-size:0.9em">Quay lại terminal và chọn [1] Start VM</div>
 <div class="rdp-info" id="rdp-info"></div>
-</div>
-
-<div class="status success" id="status-stopped">
-<div style="font-size:1.8em;margin-bottom:8px">⏹️</div>
-<div style="font-size:1.2em;font-weight:700;margin-bottom:5px">VM đã dừng!</div>
-<div style="color:#8892b0;font-size:0.9em">Bạn có thể khởi động lại hoặc xóa VM</div>
-</div>
-
-<div class="status success" id="status-deleted">
-<div style="font-size:1.8em;margin-bottom:8px">🗑️</div>
-<div style="font-size:1.2em;font-weight:700;margin-bottom:5px">VM đã xóa!</div>
-<div style="color:#8892b0;font-size:0.9em">Sẵn sàng tạo VM mới</div>
 </div>
 
 <div class="status error" id="status-error">
@@ -239,7 +691,7 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:linear-gradient(135d
 <div id="error-text" style="color:#ff6b6b;font-size:0.9em"></div>
 </div>
 
-<div class="footer">WinBox Dashboard v2.0 | QEMU VM Manager</div>
+<div class="footer">WinBox Dashboard v3.0 | 4 Chức năng: Start | Stop | Delete | Create</div>
 </div>
 
 <script>
@@ -261,8 +713,7 @@ function selectIso(id){
 }
 
 function updateButtons(){
-    const canStart=selectedPreset&&selectedIso;
-    document.getElementById('submit-btn').disabled=!canStart;
+    document.getElementById('submit-btn').disabled=!(selectedPreset&&selectedIso);
 }
 
 function setProgress(pct,text){
@@ -271,21 +722,12 @@ function setProgress(pct,text){
 }
 
 function hideAllStatus(){
-    ['status-loading','status-success','status-stopped','status-deleted','status-error'].forEach(id=>{
+    ['status-loading','status-success','status-error'].forEach(id=>{
         document.getElementById(id).classList.remove('active');
     });
 }
 
-async function apiCall(action,data){
-    const res=await fetch('/api/'+action,{
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body:JSON.stringify(data)
-    });
-    return await res.json();
-}
-
-async function launchVM(){
+async function createVM(){
     hideAllStatus();
     document.getElementById('status-loading').classList.add('active');
     document.getElementById('submit-btn').disabled=true;
@@ -293,18 +735,22 @@ async function launchVM(){
     let cpu=selectedPreset===4?document.getElementById('custom-cpu').value:[4,8,16][selectedPreset-1];
     let ram=selectedPreset===4?document.getElementById('custom-ram').value:[4,8,16][selectedPreset-1];
 
-    const steps=[{pct:10,text:'Kiểm tra QEMU...',delay:800},{pct:30,text:'Tải Windows image...',delay:2000},{pct:60,text:'Cấu hình VM...',delay:1500},{pct:80,text:'Khởi động QEMU...',delay:2000},{pct:95,text:'Chờ VM sẵn sàng...',delay:3000}];
+    const steps=[{pct:20,text:'Lưu cấu hình...',delay:500},{pct:60,text:'Đang ghi state...',delay:500},{pct:100,text:'Hoàn tất!',delay:500}];
     for(const step of steps){setProgress(step.pct,step.text);await new Promise(r=>setTimeout(r,step.delay));}
 
     try{
-        const data=await apiCall('launch',{preset:selectedPreset,iso:selectedIso,cpu,ram});
+        const res=await fetch('/api/create',{
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({preset:selectedPreset,iso:selectedIso,cpu,ram})
+        });
+        const data=await res.json();
         hideAllStatus();
         if(data.success){
             document.getElementById('status-success').classList.add('active');
             document.getElementById('vm-status').className='vm-status running';
-            document.getElementById('vm-status').textContent='🟢 VM đang chạy';
-            document.getElementById('stop-btn').disabled=false;
-            document.getElementById('rdp-info').innerHTML=`<div class="rdp-info-row"><span class="rdp-info-label">🪟 Hệ điều hành</span><span class="rdp-info-value">${data.win_name}</span></div><div class="rdp-info-row"><span class="rdp-info-label">⚙️ CPU</span><span class="rdp-info-value">${data.cpu} cores</span></div><div class="rdp-info-row"><span class="rdp-info-label">💾 RAM</span><span class="rdp-info-value">${data.ram} GB</span></div><div class="rdp-info-row"><span class="rdp-info-label">📡 RDP Address</span><span class="rdp-info-value">${data.rdp_host}:${data.rdp_port}<button class="copy-btn" onclick="navigator.clipboard.writeText('${data.rdp_host}:${data.rdp_port}')">Copy</button></span></div><div class="rdp-info-row"><span class="rdp-info-label">👤 Username</span><span class="rdp-info-value">${data.rdp_user}<button class="copy-btn" onclick="navigator.clipboard.writeText('${data.rdp_user}')">Copy</button></span></div><div class="rdp-info-row"><span class="rdp-info-label">🔑 Password</span><span class="rdp-info-value">${data.rdp_pass}<button class="copy-btn" onclick="navigator.clipboard.writeText('${data.rdp_pass}')">Copy</button></span></div><div class="rdp-info-row"><span class="rdp-info-label">🖥️ VNC</span><span class="rdp-info-value">localhost:5900</span></div>`;
+            document.getElementById('vm-status').textContent='✅ Đã lưu cấu hình — quay lại terminal';
+            document.getElementById('rdp-info').innerHTML=`<div class="rdp-info-row"><span class="rdp-info-label">🪟 Hệ điều hành</span><span class="rdp-info-value">${data.win_name}</span></div><div class="rdp-info-row"><span class="rdp-info-label">⚙️ CPU</span><span class="rdp-info-value">${data.cpu} cores</span></div><div class="rdp-info-row"><span class="rdp-info-label">💾 RAM</span><span class="rdp-info-value">${data.ram} GB</span></div><div class="rdp-info-row"><span class="rdp-info-label">📡 RDP Address</span><span class="rdp-info-value">${data.rdp_host}:${data.rdp_port}</span></div><div class="rdp-info-row"><span class="rdp-info-label">👤 Username</span><span class="rdp-info-value">${data.rdp_user}</span></div><div class="rdp-info-row"><span class="rdp-info-label">🔑 Password</span><span class="rdp-info-value">${data.rdp_pass}</span></div>`;
         }else{
             document.getElementById('status-error').classList.add('active');
             document.getElementById('error-text').textContent=data.error||'Lỗi không xác định';
@@ -317,67 +763,6 @@ async function launchVM(){
     document.getElementById('submit-btn').disabled=false;
 }
 
-async function stopVM(){
-    hideAllStatus();
-    document.getElementById('status-loading').classList.add('active');
-    setProgress(50,'Đang dừng VM...');
-    try{
-        const data=await apiCall('stop',{});
-        hideAllStatus();
-        if(data.success){
-            document.getElementById('status-stopped').classList.add('active');
-            document.getElementById('vm-status').className='vm-status stopped';
-            document.getElementById('vm-status').textContent='🔴 VM đang tắt';
-            document.getElementById('stop-btn').disabled=true;
-        }else{
-            document.getElementById('status-error').classList.add('active');
-            document.getElementById('error-text').textContent=data.error||'Không thể dừng VM';
-        }
-    }catch(e){
-        hideAllStatus();
-        document.getElementById('status-error').classList.add('active');
-        document.getElementById('error-text').textContent=e.message;
-    }
-}
-
-async function deleteVM(){
-    if(!confirm('Bạn có chắc muốn XÓA VM?\\n\\nThao tác này sẽ:\\n- Dừng VM nếu đang chạy\\n- Xóa file win.img\\n- Không thể hoàn tác!')) return;
-    hideAllStatus();
-    document.getElementById('status-loading').classList.add('active');
-    setProgress(50,'Đang xóa VM...');
-    try{
-        const data=await apiCall('delete',{});
-        hideAllStatus();
-        if(data.success){
-            document.getElementById('status-deleted').classList.add('active');
-            document.getElementById('vm-status').className='vm-status stopped';
-            document.getElementById('vm-status').textContent='🔴 VM đã xóa';
-            document.getElementById('stop-btn').disabled=true;
-        }else{
-            document.getElementById('status-error').classList.add('active');
-            document.getElementById('error-text').textContent=data.error||'Không thể xóa VM';
-        }
-    }catch(e){
-        hideAllStatus();
-        document.getElementById('status-error').classList.add('active');
-        document.getElementById('error-text').textContent=e.message;
-    }
-}
-
-// Check VM status on load
-async function checkStatus(){
-    try{
-        const res=await fetch('/api/status');
-        const data=await res.json();
-        if(data.running){
-            document.getElementById('vm-status').className='vm-status running';
-            document.getElementById('vm-status').textContent='🟢 VM đang chạy';
-            document.getElementById('stop-btn').disabled=false;
-        }
-    }catch(e){}
-}
-
-checkStatus();
 selectPreset(1);
 selectIso(5);
 </script>
@@ -388,50 +773,14 @@ with open(os.path.join(web_dir, 'index.html'), 'w') as f:
     f.write(html)
 
 server_py = """#!/usr/bin/env python3
-import http.server, socketserver, json, os, sys, subprocess, signal
+import http.server, socketserver, json, os, sys
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8080
 STATE_FILE = "/tmp/winbox-state.json"
-PID_FILE = "/tmp/winvm-1.pid"
-IMG_FILE = os.path.join(os.getcwd(), "win.img")
-
-def vm_running():
-    if not os.path.exists(PID_FILE): return False
-    try:
-        with open(PID_FILE) as f: pid = int(f.read().strip())
-        os.kill(pid, 0)
-        return True
-    except: return False
-
-def stop_vm():
-    if not os.path.exists(PID_FILE): return True
-    try:
-        with open(PID_FILE) as f: pid = int(f.read().strip())
-        os.kill(pid, signal.SIGTERM)
-        import time; time.sleep(2)
-        try: os.kill(pid, 0); os.kill(pid, signal.SIGKILL)
-        except: pass
-        os.remove(PID_FILE)
-        return True
-    except Exception as e: return False
-
-def delete_vm():
-    stop_vm()
-    for f in [IMG_FILE, "/tmp/winvm-1.qmp", "/tmp/winvm-1.state", "/tmp/qemu-launch.log"]:
-        try: os.remove(f)
-        except: pass
-    return True
 
 class Handler(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
         if self.path == '/': self.path = '/index.html'
-        if self.path == '/api/status':
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.end_headers()
-            self.wfile.write(json.dumps({"running": vm_running()}).encode())
-            return
         return super().do_GET()
 
     def do_POST(self):
@@ -440,19 +789,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         try: data = json.loads(body)
         except: data = {}
 
-        if self.path == '/api/launch':
+        if self.path == '/api/create':
             with open(STATE_FILE, 'w') as f: json.dump(data, f)
             self.send_json({"success": True})
-            return
-
-        if self.path == '/api/stop':
-            ok = stop_vm()
-            self.send_json({"success": ok, "error": "" if ok else "Không thể dừng VM"})
-            return
-
-        if self.path == '/api/delete':
-            ok = delete_vm()
-            self.send_json({"success": ok})
             return
 
         self.send_response(404)
@@ -489,7 +828,7 @@ _start_web_server() {
     _create_dashboard_files
 
     if [[ -f "$WEB_PID_FILE" ]]; then
-        old_pid=$(cat "$WEB_PID_FILE" 2>/dev/null || echo "")
+        local old_pid; old_pid=$(cat "$WEB_PID_FILE" 2>/dev/null || echo "")
         [[ -n "$old_pid" ]] && kill "$old_pid" 2>/dev/null || true
     fi
 
@@ -501,17 +840,15 @@ _start_web_server() {
     done
 
     nohup python3 "$WEB_DIR/server.py" "$WEB_PORT" > /tmp/winbox-web.log 2>&1 &
-    WEB_PID=$!
-    echo "$WEB_PID" > "$WEB_PID_FILE"
-    disown "$WEB_PID"
+    local web_pid=$!
+    echo "$web_pid" > "$WEB_PID_FILE"
+    disown "$web_pid"
 
     sleep 1
-    if kill -0 "$WEB_PID" 2>/dev/null; then
+    if kill -0 "$web_pid" 2>/dev/null; then
         echo -e "${G}✔${W} Dashboard: ${C}http://localhost:$WEB_PORT${W}"
-
-        local _host_ip=$(hostname -I 2>/dev/null | awk '{print $1}' | head -1 || echo "localhost")
+        local _host_ip; _host_ip=$(hostname -I 2>/dev/null | awk '{print $1}' | head -1 || echo "localhost")
         echo -e "${B}ℹ${W}  Hoặc: ${C}http://${_host_ip}:$WEB_PORT${W}"
-
         if command -v xdg-open &>/dev/null; then
             xdg-open "http://localhost:$WEB_PORT" 2>/dev/null || true
         elif command -v open &>/dev/null; then
@@ -528,7 +865,7 @@ _start_web_server() {
 #  ĐỢI CONFIG TỪ WEB
 # ════════════════════════════════════════════════════════════════
 _wait_web_config() {
-    local _state_file="/tmp/winbox-state.json"
+    local _state_file="$WINBOX_STATE"
     local _timeout=300
     local _elapsed=0
 
@@ -537,43 +874,13 @@ _wait_web_config() {
 
     while [[ ! -f "$_state_file" ]] && [[ $_elapsed -lt $_timeout ]]; do
         sleep 2
-        _elapsed=$((_elapsed + 2))
+        _elapsed=$(( $_elapsed + 2 ))
         printf "\r${B}◜${W} Đang đợi... %ss" "$_elapsed"
     done
     printf "\n"
 
     if [[ -f "$_state_file" ]]; then
-        # FIX: Trim whitespace/newline từ JSON values
-        win_choice=$(python3 -c "import json; d=json.load(open('$_state_file')); print(str(d.get('iso','5')).strip())" 2>/dev/null || echo "5")
-        local _preset=$(python3 -c "import json; d=json.load(open('$_state_file')); print(str(d.get('preset','1')).strip())" 2>/dev/null || echo "1")
-        local _cpu=$(python3 -c "import json; d=json.load(open('$_state_file')); print(str(d.get('cpu','4')).strip())" 2>/dev/null || echo "4")
-        local _ram=$(python3 -c "import json; d=json.load(open('$_state_file')); print(str(d.get('ram','4')).strip())" 2>/dev/null || echo "4")
-
-        if [[ "$_preset" == "4" ]]; then
-            cpu_core="$_cpu"
-            ram_size="$_ram"
-        else
-            # Map preset to values
-            case "$_preset" in
-                1) cpu_core=4;  ram_size=4 ;;
-                2) cpu_core=8;  ram_size=8 ;;
-                3) cpu_core=16; ram_size=16 ;;
-                *) cpu_core=4;  ram_size=4 ;;
-            esac
-        fi
-
-        # FIX: Đảm bảo win_choice là số hợp lệ 1-6
-        case "$win_choice" in
-            1|2|3|4|5|6) : ;;
-            *) win_choice=5 ;;
-        esac
-
-        echo -e "${G}✔${W} Config nhận được:"
-        echo -e "   🖥️  CPU: ${B}$cpu_core${W} cores"
-        echo -e "   💾 RAM: ${B}$ram_size${W} GB"
-        echo -e "   💿 ISO: ${B}$win_choice${W}"
-
-        rm -f "$_state_file"
+        echo -e "${G}✔${W} Đã nhận cấu hình từ Dashboard"
         return 0
     else
         echo -e "${R}✘${W} Timeout đợi config"
@@ -582,139 +889,8 @@ _wait_web_config() {
 }
 
 # ════════════════════════════════════════════════════════════════
-#  QEMU RESOLVE
+#  ROOTLESS BUILD
 # ════════════════════════════════════════════════════════════════
-_resolve_qemu_bin() {
-    for q in "${QEMU_BIN:-}" "$HOME/qemu-static/bin/qemu-system-x86_64" "$HOME/qemu-optimized/bin/qemu-system-x86_64" "/opt/qemu-optimized/bin/qemu-system-x86_64" "$(command -v qemu-system-x86_64 2>/dev/null)"; do
-        [[ -n "$q" && -x "$q" ]] && { echo "$q"; return 0; }
-    done
-    return 1
-}
-
-_resolve_qemu_img() {
-    for qi in "$(dirname "${QEMU_BIN:-/nonexistent}")/qemu-img" "${PREFIX:-}/bin/qemu-img" "$HOME/qemu-static/bin/qemu-img" "$HOME/qemu-optimized/bin/qemu-img" "/opt/qemu-optimized/bin/qemu-img" "/usr/bin/qemu-img" "$(command -v qemu-img 2>/dev/null || true)"; do
-        if [[ -x "$qi" ]]; then
-            if "$qi" --version >/dev/null 2>&1; then
-                echo "$qi"; return 0
-            fi
-        fi
-    done
-    return 1
-}
-
-# ════════════════════════════════════════════════════════════════
-#  BOOTSTRAP & ENV DETECTION
-# ════════════════════════════════════════════════════════════════
-_bootstrap_tools() {
-    local _apt=""
-    if [[ "$(id -u)" == "0" ]] && command -v apt-get &>/dev/null; then _apt="apt-get"
-    elif sudo -n true 2>/dev/null && command -v apt-get &>/dev/null; then _apt="sudo apt-get"; fi
-    [[ -z "$_apt" ]] && return 0
-    local _need=0
-    for _t in wget curl python3; do command -v "$_t" &>/dev/null || _need=1; done
-    [[ "$_need" == "0" ]] && return 0
-    echo -e "${B}ℹ${W}  Bootstrap: cài công cụ..."
-    export DEBIAN_FRONTEND=noninteractive
-    $_apt update -qq > /dev/null 2>&1 || true
-    for _pkg in wget curl python3 python3-pip; do
-        command -v "$_pkg" &>/dev/null || $_apt install -y -qq "$_pkg" > /dev/null 2>&1 || true
-    done
-}
-_bootstrap_tools
-
-KVM_AVAILABLE=0
-KVM_MODE=""
-
-_detect_kvm() {
-    echo ""
-    echo -e "${C}════════════════════════════════════${W}"
-    echo -e "${C}🔍 KIỂM TRA KVM${W}"
-    echo -e "${C}════════════════════════════════════${W}"
-
-    if [[ ! -e /dev/kvm ]]; then
-        echo -e "${Y}⚠${W}  /dev/kvm không tồn tại — dùng TCG"
-        KVM_AVAILABLE=0; KVM_MODE="tcg"
-        return
-    fi
-
-    local KVM_LS=$(ls -l /dev/kvm 2>/dev/null)
-    local KVM_OWNER=$(echo "$KVM_LS" | awk '{print $3}')
-    local KVM_GROUP=$(echo "$KVM_LS" | awk '{print $4}')
-    local CAN_USE_KVM=0
-
-    if [[ "$KVM_OWNER" == "root" ]] && [[ "$KVM_GROUP" == "root" || "$KVM_GROUP" == "kvm" ]]; then
-        if [[ "$(id -u)" == "0" ]]; then
-            CAN_USE_KVM=1
-        else
-            local CURRENT_GROUPS=$(id -Gn)
-            if echo "$CURRENT_GROUPS" | grep -qw "$KVM_GROUP"; then
-                CAN_USE_KVM=1
-            fi
-        fi
-    fi
-
-    if [[ $CAN_USE_KVM -eq 1 ]] && grep -qE '(vmx|svm)' /proc/cpuinfo 2>/dev/null; then
-        KVM_AVAILABLE=1; KVM_MODE="kvm"
-        echo -e "${G}🚀 KVM ACCELERATION: BẬT${W}"
-    else
-        echo -e "${Y}⚠${W}  Không đủ quyền dùng /dev/kvm — dùng TCG"
-        KVM_AVAILABLE=0; KVM_MODE="tcg"
-    fi
-}
-
-APT_CMD=""
-APT_OK=0
-ROOTLESS=0
-
-_detect_apt() {
-    if [[ "$(id -u)" == "0" ]] && apt-get update -qq > /dev/null 2>&1; then
-        APT_CMD="apt-get"; APT_OK=1; return
-    fi
-    if sudo -n true 2>/dev/null && sudo apt-get update -qq > /dev/null 2>&1; then
-        APT_CMD="sudo apt-get"; APT_OK=1; return
-    fi
-    APT_OK=0; ROOTLESS=1
-}
-
-apt_install() {
-    local pkg="$1"
-    $APT_CMD install -y -qq "$pkg" > /dev/null 2>&1
-}
-
-ARIA2_OPTS=(
-    --split=16 --max-connection-per-server=16 --min-split-size=1M
-    --max-concurrent-downloads=16 --file-allocation=none --continue=true
-    --check-certificate=false --max-tries=5 --retry-wait=3 --timeout=60
-    --connect-timeout=15 --piece-length=1M --human-readable=true
-    --download-result=full --console-log-level=notice --summary-interval=3
-)
-
-_ensure_aria2() {
-    command -v aria2c &>/dev/null && return 0
-    local _bin_dir="${PREFIX:-$HOME/qemu-static}/bin"
-    mkdir -p "$_bin_dir"
-    local _tmp_zip="/tmp/aria2-static-$$.zip"
-    local _tmp_dir="/tmp/aria2-static-$$"
-
-    if wget -q --no-check-certificate "https://github.com/abcfy2/aria2-static-build/releases/latest/download/aria2-x86_64-linux-musl_static.zip" -O "$_tmp_zip" 2>/dev/null; then
-        mkdir -p "$_tmp_dir"
-        if unzip -q "$_tmp_zip" -d "$_tmp_dir" 2>/dev/null; then
-            local _aria2c=$(find "$_tmp_dir" -name "aria2c" -type f | head -1)
-            if [[ -n "$_aria2c" ]]; then
-                install -m755 "$_aria2c" "$_bin_dir/aria2c"
-                export PATH="$_bin_dir:$PATH"
-                rm -rf "$_tmp_zip" "$_tmp_dir"
-                return 0
-            fi
-        fi
-        rm -rf "$_tmp_zip" "$_tmp_dir"
-    fi
-    if [[ -n "$APT_CMD" ]]; then
-        $APT_CMD install -y -qq aria2 > /dev/null 2>&1 && return 0
-    fi
-    return 1
-}
-
 _rootless_build() {
     local ROOTLESS_PREFIX="$HOME/qemu-static"
     local ROOTLESS_BIN_DIR="$ROOTLESS_PREFIX/bin"
@@ -725,7 +901,7 @@ _rootless_build() {
     mkdir -p "$ROOTLESS_PREFIX" "$ROOTLESS_APPIMAGE_DIR"
 
     if [[ -x "$ROOTLESS_QEMU" ]] && [[ -f "$ROOTLESS_APPIMAGE" ]]; then
-        local rv=$("$ROOTLESS_QEMU" --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || echo "unknown")
+        local rv; rv=$("$ROOTLESS_QEMU" --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || echo "unknown")
         echo -e "${G}⚡ QEMU AppImage v${rv} đã tồn tại${W}"
         export QEMU_BIN="$ROOTLESS_QEMU"
         export PREFIX="$ROOTLESS_PREFIX"
@@ -765,335 +941,44 @@ _rootless_build() {
 }
 
 # ════════════════════════════════════════════════════════════════
-#  STOP VM HELPER
+#  MAIN MENU
 # ════════════════════════════════════════════════════════════════
-_stop_vm() {
-    if [[ -f "$WINVM_PID_FILE" ]]; then
-        local _pid=$(cat "$WINVM_PID_FILE" 2>/dev/null || echo "")
-        if [[ -n "$_pid" ]]; then
-            kill "$_pid" 2>/dev/null || true
-            sleep 2
-            kill -0 "$_pid" 2>/dev/null && kill -9 "$_pid" 2>/dev/null || true
-        fi
-    fi
-    pkill -f 'qemu-system-x86_64' 2>/dev/null || true
-    rm -f "$WINVM_PID_FILE" "$WINVM_QMP_SOCK" "$WINVM_STATE_FILE"
-    echo -e "${G}✔${W} VM đã dừng"
-}
-
-# ════════════════════════════════════════════════════════════════
-#  DELETE VM HELPER
-# ════════════════════════════════════════════════════════════════
-_delete_vm() {
-    _stop_vm
-    [[ -f "$WIN_IMG_PATH" ]] && rm -f "$WIN_IMG_PATH" && echo -e "${G}✔${W} Đã xóa $WIN_IMG_PATH"
-    rm -f /tmp/qemu-launch.log /tmp/winbox-state.json 2>/dev/null || true
-    echo -e "${G}✔${W} VM đã xóa hoàn toàn"
-}
-
-# ════════════════════════════════════════════════════════════════
-#  MAIN FLOW
-# ════════════════════════════════════════════════════════════════
-
-# Khởi động web dashboard
-_start_web_server
-
-# Detect environment
-_detect_apt
-_detect_kvm
-
-# Đợi config từ web
-_wait_web_config || {
-    echo -e "${R}✘${W} Không nhận được config. Thoát."
-    exit 1
-}
-
-# FIX: Lấy giá trị ISO bằng helper functions
-WIN_NAME=$(_get_iso_name "$win_choice")
-WIN_URL=$(_get_iso_url "$win_choice")
-USE_UEFI=$(_get_iso_uefi "$win_choice")
-RDP_USER=$(_get_iso_user "$win_choice")
-RDP_PASS=$(_get_iso_pass "$win_choice")
-
-echo -e "${G}✔${W} Image: ${C}${WIN_NAME}${W}"
-echo -e "${G}✔${W} User: ${C}${RDP_USER}${W} / ${C}${RDP_PASS}${W}"
-
-# QEMU detection/build
-QEMU_BIN="/usr/bin/qemu-system-x86_64"
-OPT_QEMU="/opt/qemu-optimized/bin/qemu-system-x86_64"
-HOME_QEMU="$HOME/qemu-optimized/bin/qemu-system-x86_64"
-ROOTLESS_QEMU="$HOME/qemu-static/bin/qemu-system-x86_64"
-
-_qemu_found=0
-for q in "$OPT_QEMU" "$HOME_QEMU" "$ROOTLESS_QEMU" "$QEMU_BIN" "$(command -v qemu-system-x86_64 2>/dev/null)"; do
-    if [[ -n "$q" && -x "$q" ]]; then
-        QEMU_VER=$("$q" --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || echo "unknown")
-        echo -e "${G}⚡ QEMU v${QEMU_VER} tại: $q${W}"
-        export QEMU_BIN="$q"
-        export PATH="$(dirname "$q"):$PATH"
-        _qemu_found=1
-        break
-    fi
-done
-
-if [[ "$_qemu_found" == "0" ]]; then
-    if [[ "$ROOTLESS" == "1" ]] || [[ "$APT_OK" == "0" ]]; then
-        echo -e "${B}ℹ${W}  Không có QEMU — tải AppImage..."
-        _rootless_build || { echo -e "${R}✘${W} Không thể có QEMU"; exit 1; }
-    else
-        echo -e "${B}ℹ${W}  Không có QEMU — cài qua apt..."
-        $APT_CMD install -y -qq qemu-system-x86 qemu-utils 2>/dev/null || true
-        if command -v qemu-system-x86_64 &>/dev/null; then
-            QEMU_BIN=$(command -v qemu-system-x86_64)
-            export QEMU_BIN
-        else
-            _rootless_build || { echo -e "${R}✘${W} Không thể có QEMU"; exit 1; }
-        fi
-    fi
-fi
-
-QEMU_IMG="$(_resolve_qemu_img 2>/dev/null || echo "")"
-[[ -z "$QEMU_IMG" ]] && QEMU_IMG="$(dirname "$QEMU_BIN")/qemu-img"
-
-# ════════════════════════════════════════════════════════════════
-#  TẢI WINDOWS IMAGE
-# ════════════════════════════════════════════════════════════════
-
-_img_valid() {
-    local f="$1"
-    [[ -f "$f" ]] || return 1
-    local sz=$(stat -c%s "$f" 2>/dev/null || echo 0)
-    [[ "$sz" -ge 2147483648 ]] && return 0
-    return 1
-}
-
-if _img_valid "$WIN_IMG_PATH"; then
-    echo -e "${G}✔${W} Image đã có — bỏ qua tải"
-else
+_show_menu() {
     echo ""
-    echo -e "${C}════════════════════════════════════${W}"
-    echo -e "${C}⬇  Đang tải: ${Y}${WIN_NAME}${W}"
-    echo -e "${C}════════════════════════════════════${W}"
-
-    _ensure_aria2 || true
-
-    if command -v aria2c &>/dev/null; then
-        aria2c "${ARIA2_OPTS[@]}" "$WIN_URL" -d "$(dirname "$WIN_IMG_PATH")" -o "$(basename "$WIN_IMG_PATH")"
-    else
-        wget --progress=bar:force --continue "$WIN_URL" -O "$WIN_IMG_PATH"
-    fi
-
-    if _img_valid "$WIN_IMG_PATH"; then
-        echo -e "${G}✔${W} Tải xong"
-    else
-        echo -e "${R}✘${W} Tải thất bại hoặc file không hợp lệ"
-        exit 1
-    fi
-fi
+    echo -e "${C}══════════════════════════════════════════════════${W}"
+    echo -e "${C}           🪟 WINBOX v3 - MENU CHÍNH${W}"
+    echo -e "${C}══════════════════════════════════════════════════${W}"
+    echo ""
+    echo -e "  ${G}[1]${W} ▶️  START VM    — Khởi động VM đã tạo"
+    echo -e "  ${Y}[2]${W} ⏹️  STOP VM     — Dừng VM đang chạy"
+    echo -e "  ${R}[3]${W} 🗑️  DELETE VM   — Xóa toàn bộ VM (nền)"
+    echo -e "  ${B}[4]${W} 🔧 CREATE VM   — Tạo VM mới (chọn config)"
+    echo ""
+    echo -e "  ${C}[5]${W} ℹ️  VM INFO     — Xem thông tin VM"
+    echo -e "  ${C}[0]${W} 🚪 THOÁT"
+    echo ""
+    echo -e "${C}══════════════════════════════════════════════════${W}"
+}
 
 # ════════════════════════════════════════════════════════════════
-#  RESIZE DISK
+#  MAIN LOOP
 # ════════════════════════════════════════════════════════════════
-extra_gb=20
-if [[ -n "$QEMU_IMG" && -x "$QEMU_IMG" ]]; then
-    echo -e "${B}ℹ${W}  Mở rộng disk +${extra_gb}GB..."
-    "$QEMU_IMG" resize "$WIN_IMG_PATH" "+${extra_gb}G" 2>/dev/null || true
-fi
-
-# ════════════════════════════════════════════════════════════════
-#  CẤU HÌNH VM
-# ════════════════════════════════════════════════════════════════
-echo ""
-echo -e "${C}════════════════════════════════════${W}"
-echo -e "${C}⚙  CẤU HÌNH VM${W}"
-echo -e "${C}════════════════════════════════════${W}"
-echo -e "🖥️  CPU: ${B}${cpu_core}${W} cores"
-echo -e "💾 RAM: ${B}${ram_size}${W} GB"
-
-# ════════════════════════════════════════════════════════════════
-#  TCG TUNING
-# ════════════════════════════════════════════════════════════════
-if [[ "$KVM_AVAILABLE" == "0" ]]; then
-    export MALLOC_ARENA_MAX=4
-    export MALLOC_MMAP_THRESHOLD_=131072
-    export QEMU_AUDIO_DRV=none
-
-    _host_ram_gb=$(awk '/MemTotal/{printf "%.0f",$2/1024/1024}' /proc/meminfo)
-    [[ "${_host_ram_gb:-0}" -lt 1 ]] && _host_ram_gb=4
-    TCG_TB_MB=$(( _host_ram_gb * 1024 * 6 / 100 ))
-    [[ "$TCG_TB_MB" -lt 4096  ]] && TCG_TB_MB=4096
-    [[ "$TCG_TB_MB" -gt 8192 ]] && TCG_TB_MB=8192
-
-    echo -e "${G}⚡ TCG TB cache: ${TCG_TB_MB}MB${W}"
-
-    _raw_cpu_name=$(grep -m1 "model name" /proc/cpuinfo 2>/dev/null | sed 's/^.*: //' || echo "")
-    _cpu_vendor=$(grep -m1 "vendor_id" /proc/cpuinfo 2>/dev/null | awk '{print $NF}' || echo "")
-
-    if [[ -n "$_raw_cpu_name" && "$_raw_cpu_name" != "unknown" ]]; then
-        cpu_host="$_raw_cpu_name"
-        cpu_model_id=$(printf '%s' "$cpu_host" | tr ',' ' ' | tr -d '"\\@#$%^&*|<>' | sed 's/[[:space:]]\+/ /g; s/^[[:space:]]*//; s/[[:space:]]*$//' | cut -c1-48)
-    else
-        case "$_cpu_vendor" in
-            GenuineIntel) cpu_host="Intel Xeon"; cpu_model_id="Intel Xeon Processor" ;;
-            AuthenticAMD) cpu_host="AMD EPYC"; cpu_model_id="AMD EPYC Processor" ;;
-            *) cpu_host="Generic"; cpu_model_id="Generic x86_64 Processor" ;;
+main() {
+    while true; do
+        _show_menu
+        read -rp "Chọn chức năng [0-5]: " choice
+        case "$choice" in
+            1) _start_vm ;;
+            2) _stop_vm ;;
+            3) _delete_vm ;;
+            4) _create_vm ;;
+            5) _vm_info ;;
+            0|q|exit) echo -e "${G}✔${W} Tạm biệt!"; exit 0 ;;
+            *) _rl_warn "Lựa chọn không hợp lệ"; ;;
         esac
-    fi
-
-    CPU_EXTRA=""
-    grep -q ssse3  /proc/cpuinfo && CPU_EXTRA="$CPU_EXTRA,+ssse3"
-    grep -q sse4_1 /proc/cpuinfo && CPU_EXTRA="$CPU_EXTRA,+sse4.1"
-    grep -q sse4_2 /proc/cpuinfo && CPU_EXTRA="$CPU_EXTRA,+sse4.2"
-    grep -q ' avx ' /proc/cpuinfo && CPU_EXTRA="$CPU_EXTRA,+avx"
-    grep -q avx2   /proc/cpuinfo && CPU_EXTRA="$CPU_EXTRA,+avx2"
-
-    cpu_model="max,hypervisor=off,tsc=on,pmu=off,l3-cache=on,+cmov,+mmx,+fxsr,+sse2,+cx16,+x2apic,+sep,+pat,+pse,+aes,+popcnt,-tsc-deadline${CPU_EXTRA},model-id=${cpu_model_id}"
-fi
-
-# ════════════════════════════════════════════════════════════════
-#  OVMF (UEFI)
-# ════════════════════════════════════════════════════════════════
-OVMF_PATH=""
-if [[ "$USE_UEFI" == "yes" ]]; then
-    for _ovmf in /usr/share/qemu/OVMF.fd /usr/share/ovmf/OVMF.fd /usr/share/OVMF/OVMF_CODE.fd; do
-        [[ -f "$_ovmf" ]] && { OVMF_PATH="$_ovmf"; break; }
+        echo ""
+        read -rp "Nhấn Enter để tiếp tục..."
     done
+}
 
-    if [[ -z "$OVMF_PATH" ]]; then
-        echo -e "${Y}⚠${W}  OVMF không tìm thấy — tải..."
-        mkdir -p /tmp/ovmf
-        if wget -q -O /tmp/ovmf/OVMF.fd "https://github.com/nicowillis/ovmf-prebuilt/raw/main/OVMF.fd" 2>/dev/null; then
-            OVMF_PATH="/tmp/ovmf/OVMF.fd"
-        fi
-    fi
-
-    if [[ -n "$OVMF_PATH" ]]; then
-        echo -e "${G}✔${W} OVMF: $OVMF_PATH"
-    else
-        echo -e "${Y}⚠${W}  Không có OVMF — dùng BIOS"
-    fi
-fi
-
-# ════════════════════════════════════════════════════════════════
-#  BUILD QEMU COMMAND
-# ════════════════════════════════════════════════════════════════
-rm -f "$WINVM_QMP_SOCK"
-
-if [[ "$KVM_AVAILABLE" == "1" ]]; then
-    QEMU_CMD=(
-        "$QEMU_BIN"
-        -machine q35,hpet=off
-        -cpu host
-        -smp "$cpu_core"
-        -m "${ram_size}G"
-        -accel kvm
-        -rtc base=localtime,clock=host
-    )
-    NET_DEVICE="-device virtio-net-pci,netdev=n0"
-    echo -e "${G}⚡ KVM mode: -cpu host -accel kvm${W}"
-else
-    QEMU_CMD=(
-        "$QEMU_BIN"
-        -machine q35,hpet=off,vmport=off,mem-merge=off
-        -cpu "$cpu_model"
-        -smp "$cpu_core,cores=$cpu_core,threads=1,sockets=1"
-        -m "${ram_size}G"
-        -accel "tcg,thread=multi,split-wx=off,one-insn-per-tb=off,tb-size=$TCG_TB_MB"
-        -rtc base=localtime
-        -overcommit cpu-pm=on
-        -boot order=c,strict=on
-        -no-shutdown
-        -device virtio-mouse-pci
-        -device virtio-keyboard-pci
-        -nodefaults
-        -smbios type=1,manufacturer="Dell Inc.",product="PowerEdge R640"
-        -no-user-config
-    )
-    NET_DEVICE="-device virtio-net-pci,netdev=n0"
-    echo -e "${Y}⚡ TCG mode: software emulation${W}"
-fi
-
-[[ -n "$OVMF_PATH" ]] && QEMU_CMD+=(-bios "$OVMF_PATH")
-
-QEMU_CMD+=(
-    -drive "file=$WIN_IMG_PATH,if=none,id=disk0,cache=unsafe,aio=threads,format=raw"
-    -device virtio-blk-pci,drive=disk0,iothread=io1,num-queues=4,queue-size=256
-    -object iothread,id=io1
-)
-
-QEMU_CMD+=(
-    -netdev "user,id=n0,hostfwd=tcp::${WINVM_RDP_PORT}-:3389"
-    $NET_DEVICE
-)
-
-QEMU_CMD+=(
-    -vga virtio
-    -vnc :0
-    -device nec-usb-xhci
-    -device usb-tablet
-)
-
-if [[ -e /dev/urandom ]]; then
-    QEMU_CMD+=(-object rng-random,filename=/dev/urandom,id=rng0 -device virtio-rng-pci,rng=rng0)
-fi
-
-QEMU_CMD+=(-qmp "unix:$WINVM_QMP_SOCK,server,nowait")
-
-# ════════════════════════════════════════════════════════════════
-#  KHỞI ĐỘNG VM
-# ════════════════════════════════════════════════════════════════
-echo ""
-echo -e "${B}ℹ${W}  Khởi động ${WIN_NAME}..."
-
-QEMU_LOG="/tmp/qemu-launch-$$.log"
-nohup "${QEMU_CMD[@]}" >> "$QEMU_LOG" 2>&1 &
-QEMU_PID=$!
-echo "$QEMU_PID" > "$WINVM_PID_FILE"
-disown "$QEMU_PID"
-
-sleep 4
-if kill -0 "$QEMU_PID" 2>/dev/null; then
-    echo -e "${G}✔${W} VM đã khởi động (PID: $QEMU_PID)"
-else
-    echo -e "${R}✘${W} VM KHÔNG khởi động được!"
-    cat "$QEMU_LOG"
-    exit 1
-fi
-
-# ════════════════════════════════════════════════════════════════
-#  HIỂN THỊ THÔNG TIN KẾT NỐI
-# ════════════════════════════════════════════════════════════════
-echo ""
-echo -e "${C}══════════════════════════════════════════════${W}"
-echo -e "${C}🚀 WINBOX READY${W}"
-echo -e "${C}══════════════════════════════════════════════${W}"
-echo -e "🪟 OS        : ${Y}${WIN_NAME}${W}"
-echo -e "⚙️  CPU      : ${B}${cpu_core}${W} cores"
-echo -e "💾 RAM       : ${B}${ram_size}${W} GB"
-if [[ "$KVM_AVAILABLE" == "1" ]]; then
-    echo -e "⚡ Accel     : ${G}KVM (hardware)${W}"
-else
-    echo -e "⚡ Accel     : ${Y}TCG (software)${W}"
-fi
-echo -e "${C}──────────────────────────────────────────────${W}"
-echo -e "📡 RDP       : ${G}localhost:${WINVM_RDP_PORT}${W}"
-echo -e "👤 Username  : ${Y}${RDP_USER}${W}"
-echo -e "🔑 Password  : ${Y}${RDP_PASS}${W}"
-echo -e "${C}──────────────────────────────────────────────${W}"
-echo -e "🖥️  VNC       : ${G}:5900${W}"
-echo -e "${C}══════════════════════════════════════════════${W}"
-echo -e "${G}🟢 Status    : RUNNING (PID: $QEMU_PID)${W}"
-echo -e "${C}══════════════════════════════════════════════${W}"
-
-# Giữ script chạy
-if [[ -t 0 ]]; then
-    echo ""
-    echo -e "${B}ℹ${W}  Nhấn ${C}Ctrl+C${W} để dừng VM và thoát"
-    trap 'echo -e "\n${Y}⚠${W}  Đang dừng VM..."; kill "$QEMU_PID" 2>/dev/null; rm -f "$WINVM_PID_FILE"; exit 0' INT
-    while kill -0 "$QEMU_PID" 2>/dev/null; do
-        sleep 5
-    done
-    echo -e "${R}✘${W} VM đã dừng"
-else
-    echo -e "${G}✔${W} VM đang chạy nền. PID: $QEMU_PID"
-fi
+main "$@"
