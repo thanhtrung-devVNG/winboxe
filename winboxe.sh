@@ -1,10 +1,11 @@
 # ════════════════════════════════════════════════════════════════
 #  WEB UI — HTTP Server nhẹ để quản lý VM
-#  Chạy trên port 8888 (có thể đổi bằng WEB_UI_PORT)
+#  Chạy trên port 8080 (có thể đổi bằng WEB_UI_PORT)
 # ════════════════════════════════════════════════════════════════
 
-WEB_UI_PORT="${WEB_UI_PORT:-8888}"
+WEB_UI_PORT="${WEB_UI_PORT:-8080}"
 WEB_UI_PID_FILE="/tmp/winbox-webui-${INSTANCE_ID}.pid"
+WEB_UI_LOG="/tmp/winbox-webui-${INSTANCE_ID}.log"
 
 _web_ui_server() {
     local _port="$1"
@@ -12,7 +13,7 @@ _web_ui_server() {
     local _web_dir="/tmp/winbox-webui-$$"
     mkdir -p "$_web_dir"
 
-    # Tạo HTML giao diện
+    # Tạo HTML giao diện (giữ nguyên như cũ)
     cat > "$_web_dir/index.html" <<'HTML_EOF'
 <!DOCTYPE html>
 <html lang="vi">
@@ -70,6 +71,12 @@ _web_ui_server() {
         .toast.show { display: block; animation: fadeIn 0.3s; }
         @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
         .loading { opacity: 0.6; pointer-events: none; }
+        .log-area { background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 12px; margin-top: 20px; max-height: 200px; overflow-y: auto; font-family: monospace; font-size: 12px; color: #8b949e; }
+        .log-area .log-line { padding: 2px 0; border-bottom: 1px solid #161b22; }
+        .log-area .log-line.info { color: #58a6ff; }
+        .log-area .log-line.success { color: #3fb950; }
+        .log-area .log-line.error { color: #f85149; }
+        .log-area .log-line.warning { color: #d29922; }
     </style>
 </head>
 <body>
@@ -79,9 +86,13 @@ _web_ui_server() {
     <div style="display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 20px;">
         <button class="btn-create" onclick="showCreateModal()">＋ Tạo VM Mới</button>
         <button class="refresh-btn" onclick="refreshVMs()">🔄 Làm mới</button>
+        <button class="refresh-btn" onclick="toggleLog()">📋 Log</button>
     </div>
     <div id="vm-list" class="vm-grid">
         <div style="color: #8b949e; grid-column: 1/-1; text-align: center; padding: 40px;">⏳ Đang tải danh sách VM...</div>
+    </div>
+    <div id="log-area" class="log-area" style="display:none;">
+        <div id="log-content"></div>
     </div>
 </div>
 
@@ -121,6 +132,7 @@ _web_ui_server() {
 <script>
 const API_BASE = '/api';
 let vmData = [];
+let logVisible = false;
 
 // Mapping OS
 const OS_MAP = {
@@ -143,6 +155,7 @@ async function refreshVMs() {
         const data = await resp.json();
         vmData = data.vms || [];
         renderVMs();
+        fetchLogs();
     } catch(e) {
         showToast('Lỗi tải danh sách VM: ' + e.message);
     }
@@ -218,29 +231,41 @@ async function createVM(e) {
         closeModal();
         showToast(result.message || 'VM đang được tạo!');
         refreshVMs();
-        // Refresh sau 2 giây để cập nhật trạng thái
         setTimeout(refreshVMs, 3000);
     } catch(e) {
         showToast('Lỗi tạo VM: ' + e.message);
     }
 }
 
-function showToast(msg) {
-    const toast = document.getElementById('toast');
-    toast.textContent = msg;
-    toast.classList.add('show');
-    setTimeout(() => toast.classList.remove('show'), 4000);
+function toggleLog() {
+    logVisible = !logVisible;
+    document.getElementById('log-area').style.display = logVisible ? 'block' : 'none';
+    if (logVisible) fetchLogs();
 }
 
-// Auto refresh mỗi 10 giây
-setInterval(refreshVMs, 10000);
+async function fetchLogs() {
+    try {
+        const resp = await fetch(API_BASE + '/logs');
+        const data = await resp.json();
+        const logContent = document.getElementById('log-content');
+        if (data.logs) {
+            logContent.innerHTML = data.logs.map(line => 
+                `<div class="log-line ${line.type}">[${line.time}] ${escapeHtml(line.msg)}</div>`
+            ).join('');
+            logContent.scrollTop = logContent.scrollHeight;
+        }
+    } catch(e) {}
+}
+
+// Auto refresh mỗi 5 giây
+setInterval(refreshVMs, 5000);
 refreshVMs();
 </script>
 </body>
 </html>
 HTML_EOF
 
-    # Tạo Python HTTP server với API endpoints
+    # Tạo Python HTTP server với API endpoints và WebSocket-like log streaming
     cat > "$_web_dir/server.py" <<'PY_EOF'
 #!/usr/bin/env python3
 import os
@@ -249,17 +274,21 @@ import json
 import subprocess
 import time
 import re
+import threading
+import queue
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
-import threading
 import glob
+import shutil
 
-WEB_PORT = int(os.environ.get('WEB_UI_PORT', '8888'))
+WEB_PORT = int(os.environ.get('WEB_UI_PORT', '8080'))
 INSTANCE_ID = int(os.environ.get('INSTANCE_ID', '1'))
 
 VM_STATE_FILE = f"/tmp/winvm-{INSTANCE_ID}.state"
 VM_PID_FILE = f"/tmp/winvm-{INSTANCE_ID}.pid"
 QEMU_CMD_FILE = "/tmp/qemu-launch.log"
+LOG_QUEUE = queue.Queue()
+LOG_LINES = []
 
 # OS mapping
 OS_MAP = {
@@ -271,17 +300,27 @@ OS_MAP = {
     6: {'name': 'Windows 10 LTSB 2022', 'url': 'https://archive.org/download/win_20260717/win.img', 'user': 'Admin', 'pass': 'Tam255Z', 'uefi': False},
 }
 
+def log_to_queue(msg, msg_type='info'):
+    """Ghi log vào queue và hiển thị trên terminal"""
+    timestamp = time.strftime('%H:%M:%S')
+    LOG_LINES.append({'time': timestamp, 'msg': msg, 'type': msg_type})
+    if len(LOG_LINES) > 1000:
+        LOG_LINES.pop(0)
+    # In ra terminal với màu sắc
+    color_map = {'info': '\033[36m', 'success': '\033[32m', 'error': '\033[31m', 'warning': '\033[33m'}
+    color = color_map.get(msg_type, '\033[0m')
+    print(f"{color}[{timestamp}] {msg}\033[0m")
+    sys.stdout.flush()
+
 def get_vm_status():
     """Lấy trạng thái VM hiện tại"""
     vms = []
-    # Tìm tất cả VM đang chạy (dựa trên process)
     try:
         output = subprocess.check_output(['pgrep', '-f', 'qemu-system-x86_64'], text=True, stderr=subprocess.DEVNULL)
         pids = [p.strip() for p in output.split('\n') if p.strip()]
     except:
         pids = []
 
-    # Đọc state file
     state = {}
     if os.path.exists(VM_STATE_FILE):
         try:
@@ -290,7 +329,6 @@ def get_vm_status():
         except:
             pass
 
-    # Đọc PID từ file
     pid_from_file = None
     if os.path.exists(VM_PID_FILE):
         try:
@@ -299,7 +337,6 @@ def get_vm_status():
         except:
             pass
 
-    # Kiểm tra PID có đang chạy không
     is_running = False
     if pid_from_file:
         try:
@@ -308,7 +345,6 @@ def get_vm_status():
         except OSError:
             is_running = False
 
-    # Lấy thông tin CPU/RAM từ QEMU command
     cpu = '?'; ram = '?'
     if is_running:
         try:
@@ -321,13 +357,11 @@ def get_vm_status():
         except:
             pass
 
-    # Đọc tên OS từ state
     os_name = state.get('win_name', 'Windows VM')
     rdp_port = state.get('rdp_port', 3388 + INSTANCE_ID)
-    rdp_user = state.get('rdp_user', 'Admin')
-    rdp_pass = 'Tam255Z'  # mặc định
+    rdp_user = 'Admin'
+    rdp_pass = 'Tam255Z'
 
-    # Xác định mật khẩu từ OS mapping (dựa vào tên)
     for k, v in OS_MAP.items():
         if v['name'] in os_name:
             rdp_user = v['user']
@@ -358,6 +392,8 @@ class WinBoxHandler(BaseHTTPRequestHandler):
             self.serve_html()
         elif path == '/api/vms':
             self.send_json({'vms': get_vm_status()})
+        elif path == '/api/logs':
+            self.send_json({'logs': LOG_LINES[-200:]})
         else:
             self.send_error(404)
 
@@ -409,7 +445,10 @@ class WinBoxHandler(BaseHTTPRequestHandler):
             ram = data.get('ram', 8)
             disk = data.get('disk', 60)
 
-            # Lưu config để script chính sử dụng
+            os_info = OS_MAP.get(os_choice, OS_MAP[5])
+            log_to_queue(f"📦 Tạo VM mới: {os_info['name']} (CPU={cpu}, RAM={ram}GB, Disk={disk}GB)", 'info')
+
+            # Lưu config
             config = {
                 'os': os_choice,
                 'cpu': cpu,
@@ -419,40 +458,48 @@ class WinBoxHandler(BaseHTTPRequestHandler):
             with open('/tmp/winbox-create-config.json', 'w') as f:
                 json.dump(config, f)
 
-            # Chạy script winbox với tham số tự động
-            # Sử dụng subprocess trong background
-            script_path = os.path.realpath(__file__)
-            # Tìm script gốc (winbox.sh)
+            # Tìm script winbox
             winbox_script = os.environ.get('WINBOX_SCRIPT', 'winbox.sh')
             if not os.path.exists(winbox_script):
-                winbox_script = os.path.join(os.path.dirname(os.path.dirname(script_path)), 'winbox.sh')
-            if not os.path.exists(winbox_script):
-                # Thử tìm trong PATH
-                import shutil
                 winbox_script = shutil.which('winbox.sh') or 'winbox.sh'
 
             os_choice_map = {1: '--win2012', 2: '--win2022', 3: '--win11', 4: '--win10ltsb', 5: '--win10ltsc', 6: '--win10ltsb2022'}
             os_flag = os_choice_map.get(os_choice, '--win10ltsc')
 
-            cmd = [
-                'bash', winbox_script,
-                '--auto', os_flag,
-                '--id=' + str(INSTANCE_ID)
-            ]
+            # Tạo command và chạy
+            cmd = ['bash', winbox_script, '--auto', os_flag, '--id=' + str(INSTANCE_ID)]
+            log_to_queue(f"🚀 Chạy lệnh: {' '.join(cmd)}", 'info')
 
-            # Chạy trong background
-            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            # Chạy trong background và capture output
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1
+            )
+
+            # Thread đọc output và ghi log
+            def read_output():
+                for line in iter(process.stdout.readline, ''):
+                    if line:
+                        log_to_queue(line.strip(), 'info')
+                process.wait()
+
+            threading.Thread(target=read_output, daemon=True).start()
 
             self.send_json({
                 'success': True,
-                'message': f'Đang tạo VM {OS_MAP.get(os_choice, {}).get("name", "Windows")} với CPU={cpu}, RAM={ram}GB, Disk={disk}GB'
+                'message': f'Đang tạo VM {os_info["name"]} với CPU={cpu}, RAM={ram}GB, Disk={disk}GB'
             })
         except Exception as e:
+            log_to_queue(f"❌ Lỗi tạo VM: {str(e)}", 'error')
             self.send_json_error(str(e))
 
     def handle_vm_action(self, vm_id, action):
+        log_to_queue(f"🎯 VM {vm_id}: {action}", 'info')
+        
         if action == 'stop':
-            # Gửi ACPI shutdown
             qmp_sock = f"/tmp/winvm-{INSTANCE_ID}.qmp"
             if os.path.exists(qmp_sock):
                 try:
@@ -461,33 +508,35 @@ class WinBoxHandler(BaseHTTPRequestHandler):
                     s.connect(qmp_sock)
                     s.send(b'{"execute":"qmp_capabilities"}\n{"execute":"system_powerdown"}\n')
                     s.close()
+                    log_to_queue("✅ Đã gửi lệnh tắt VM", 'success')
                     self.send_json({'message': 'Đã gửi lệnh tắt VM'})
-                except:
-                    self.send_json({'message': 'Không thể gửi tín hiệu tắt'})
+                except Exception as e:
+                    log_to_queue(f"❌ Lỗi gửi tín hiệu tắt: {e}", 'error')
+                    self.send_json_error('Không thể gửi tín hiệu tắt')
             else:
-                # Fallback: kill process
                 if os.path.exists(VM_PID_FILE):
                     try:
                         with open(VM_PID_FILE) as f:
                             pid = int(f.read().strip())
-                        os.kill(pid, 15)  # SIGTERM
-                        self.send_json({'message': 'Đã kill VM (SIGTERM)'})
-                    except:
+                        os.kill(pid, 15)
+                        log_to_queue(f"✅ Đã kill VM (PID: {pid})", 'success')
+                        self.send_json({'message': 'Đã kill VM'})
+                    except Exception as e:
+                        log_to_queue(f"❌ Lỗi kill VM: {e}", 'error')
                         self.send_json_error('Không thể tắt VM')
                 else:
                     self.send_json_error('Không tìm thấy VM')
         elif action == 'start':
-            # Khởi động lại VM
             winbox_script = os.environ.get('WINBOX_SCRIPT', 'winbox.sh')
             if not os.path.exists(winbox_script):
-                import shutil
                 winbox_script = shutil.which('winbox.sh') or 'winbox.sh'
-            subprocess.Popen(['bash', winbox_script, '--id=' + str(INSTANCE_ID)], 
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            cmd = ['bash', winbox_script, '--id=' + str(INSTANCE_ID)]
+            log_to_queue(f"🚀 Khởi động VM: {' '.join(cmd)}", 'info')
+            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            log_to_queue("✅ Đã gửi lệnh khởi động VM", 'success')
             self.send_json({'message': 'Đang khởi động VM'})
         elif action == 'restart':
-            # Stop + Start
-            # Gửi shutdown
+            # Stop
             qmp_sock = f"/tmp/winvm-{INSTANCE_ID}.qmp"
             if os.path.exists(qmp_sock):
                 try:
@@ -496,45 +545,59 @@ class WinBoxHandler(BaseHTTPRequestHandler):
                     s.connect(qmp_sock)
                     s.send(b'{"execute":"qmp_capabilities"}\n{"execute":"system_powerdown"}\n')
                     s.close()
+                    log_to_queue("⏹ Đã gửi lệnh tắt VM", 'info')
                 except:
                     pass
-            # Chờ 2s rồi start lại
             time.sleep(2)
+            # Start
             winbox_script = os.environ.get('WINBOX_SCRIPT', 'winbox.sh')
             if not os.path.exists(winbox_script):
-                import shutil
                 winbox_script = shutil.which('winbox.sh') or 'winbox.sh'
-            subprocess.Popen(['bash', winbox_script, '--id=' + str(INSTANCE_ID)],
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            cmd = ['bash', winbox_script, '--id=' + str(INSTANCE_ID)]
+            log_to_queue(f"🔄 Khởi động lại VM: {' '.join(cmd)}", 'info')
+            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            log_to_queue("✅ Đã gửi lệnh khởi động lại VM", 'success')
             self.send_json({'message': 'Đang khởi động lại VM'})
         else:
             self.send_json_error('Action không hợp lệ')
 
 def run_server():
+    log_to_queue(f"🌐 Web UI đang chạy trên http://localhost:{WEB_PORT}", 'info')
+    log_to_queue("📋 Terminal sẽ hiển thị log từ mọi thao tác", 'info')
+    log_to_queue("🔄 Đang chờ lệnh từ web interface...", 'info')
     server = HTTPServer(('0.0.0.0', WEB_PORT), WinBoxHandler)
-    print(f'🌐 Web UI running on http://localhost:{WEB_PORT}')
     server.serve_forever()
 
 if __name__ == '__main__':
     run_server()
 PY_EOF
 
-    # Chạy web server trong background
+    # Chạy web server trong foreground (không nohup)
     export WEB_UI_PORT="$WEB_UI_PORT"
     export INSTANCE_ID="$INSTANCE_ID"
     export WINBOX_SCRIPT="$0"
     cd "$_web_dir"
-    nohup python3 server.py > /tmp/winbox-webui-${INSTANCE_ID}.log 2>&1 &
-    WEB_UI_PID=$!
-    echo "$WEB_UI_PID" > "$WEB_UI_PID_FILE"
-    disown "$WEB_UI_PID"
-    cd - >/dev/null
-
+    
     echo -e "${G}🌐 Web UI: http://localhost:${WEB_UI_PORT}${W}"
-    echo -e "${B}ℹ${W}  Dùng trình duyệt mở link trên để quản lý VM"
+    echo -e "${B}📋 Terminal sẽ hiển thị log từ web interface${W}"
+    echo -e "${B}🔄 Đang chờ lệnh...${W}"
+    echo ""
+    
+    # Chạy server trực tiếp (không background)
+    python3 server.py
 }
 
-# Khởi động Web UI nếu chưa chạy (chỉ cho instance 1 để tránh conflict)
-if [[ "$INSTANCE_ID" == "1" ]] && [[ ! -f "$WEB_UI_PID_FILE" ]] || ! kill -0 "$(cat "$WEB_UI_PID_FILE" 2>/dev/null)" 2>/dev/null; then
+# Khởi động Web UI (chạy ở foreground, giữ terminal mở)
+if [[ "$INSTANCE_ID" == "1" ]]; then
     _web_ui_server "$WEB_UI_PORT" "$WEB_UI_PID_FILE"
+else
+    # Instance khác: chạy background
+    if [[ ! -f "$WEB_UI_PID_FILE" ]] || ! kill -0 "$(cat "$WEB_UI_PID_FILE" 2>/dev/null)" 2>/dev/null; then
+        _web_ui_server "$WEB_UI_PORT" "$WEB_UI_PID_FILE" &
+        WEB_UI_PID=$!
+        echo "$WEB_UI_PID" > "$WEB_UI_PID_FILE"
+        disown "$WEB_UI_PID"
+        echo -e "${G}🌐 Web UI: http://localhost:${WEB_UI_PORT}${W}"
+        echo -e "${B}ℹ${W}  Dùng trình duyệt mở link trên để quản lý VM"
+    fi
 fi
