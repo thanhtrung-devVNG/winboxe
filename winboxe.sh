@@ -9,6 +9,7 @@ export HOME USER LOGNAME
 NO_TUNING="${NO_TUNING:-0}"
 ORIGINAL_ARGS=("$@")
 ORIGINAL_PWD="$(pwd)"
+SCRIPT_NAME="${0##*/}"  # Tên file script đang chạy
 
 # ════════════════════════════════════════════════════════════════
 #  WINBOX
@@ -740,7 +741,8 @@ WEBUI_CMD_LOG="/tmp/winbox-webui-cmd.log"
 _webui_generate_html() {
     local _html_dir="${HOME:-/tmp}/.winbox-webui"
     mkdir -p "$_html_dir"
-    cat > "$_html_dir/index.html" << 'HTMLEOF'
+    cat > "$_html_dir/index.html" << 'HTMLEOF
+    sed -i "s|__SCRIPT_NAME__|${SCRIPT_NAME}|g" "$_html_dir/index.html"'
 <!DOCTYPE html>
 <html lang="vi">
 <head>
@@ -990,7 +992,7 @@ _webui_generate_html() {
   <div class="card">
     <div class="card-title">📜 Lệnh sẽ gửi đến Terminal</div>
     <div class="cmd-label">Terminal Command</div>
-    <div class="cmd-preview" id="cmdPreview">bash winbox.sh --auto --win10ltsc</div>
+    <div class="cmd-preview" id="cmdPreview">bash __SCRIPT_NAME__ --auto --win10ltsc</div>
   </div>
 
   <div class="btn-group">
@@ -1055,7 +1057,7 @@ function updatePreview() {
   els.rdpUser.textContent = win.user;
   els.rdpPass.textContent = win.pass;
 
-  let cmd = 'bash winbox.sh --auto --' + win.name + rebuild + pgo + safe;
+  let cmd = 'bash __SCRIPT_NAME__ --auto --' + win.name + rebuild + pgo + safe;
   if (vnc) cmd = vnc + ' ' + cmd;
   if (cpu !== '2') cmd = 'WINBOX_VCPUS=' + cpu + ' ' + cmd;
   if (ram !== '4') cmd = 'WINBOX_RAM_GB=' + ram + ' ' + cmd;
@@ -1119,35 +1121,35 @@ document.getElementById('createBtn').addEventListener('click', function() {
 
 document.getElementById('statusBtn').addEventListener('click', function() {
   var id = els.idInput.value;
-  var cmd = 'bash winbox.sh --status --id=' + id;
+  var cmd = 'bash __SCRIPT_NAME__ --status --id=' + id;
   setStatus(true, 'Đang gửi lệnh Status...');
   sendCommand(cmd, 'Status');
 });
 
 document.getElementById('stopBtn').addEventListener('click', function() {
   var id = els.idInput.value;
-  var cmd = 'bash winbox.sh --stop --id=' + id;
+  var cmd = 'bash __SCRIPT_NAME__ --stop --id=' + id;
   setStatus(false, 'Đang gửi lệnh Stop...');
   sendCommand(cmd, 'Stop');
 });
 
 document.getElementById('restartBtn').addEventListener('click', function() {
   var id = els.idInput.value;
-  var cmd = 'bash winbox.sh --restart --id=' + id;
+  var cmd = 'bash __SCRIPT_NAME__ --restart --id=' + id;
   setStatus(true, 'Đang gửi lệnh Restart...');
   sendCommand(cmd, 'Restart');
 });
 
 document.getElementById('deleteBtn').addEventListener('click', function() {
   var id = els.idInput.value;
-  var cmd = 'bash winbox.sh --delete-build --id=' + id;
+  var cmd = 'bash __SCRIPT_NAME__ --delete-build --id=' + id;
   setStatus(false, 'Đang gửi lệnh Xóa...');
   sendCommand(cmd, 'Xóa VM');
 });
 
 document.getElementById('monitorBtn').addEventListener('click', function() {
   var id = els.idInput.value;
-  var cmd = 'bash winbox.sh --monitor --id=' + id;
+  var cmd = 'bash __SCRIPT_NAME__ --monitor --id=' + id;
   setStatus(true, 'Đang gửi lệnh Monitor...');
   sendCommand(cmd, 'Monitor');
 });
