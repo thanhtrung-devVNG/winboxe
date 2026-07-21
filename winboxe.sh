@@ -3558,11 +3558,11 @@ if [[ "$AUTO_MODE" == "1" ]]; then
     echo -e "${G}🤖 AUTO MODE — bỏ qua menu, tiến hành tạo VM${W}"
     main_choice="1"
 else
-    echo "1️⃣  Tạo Windows VM"
-    echo "2️⃣  Quản Lý Windows VM"
-    echo "3️⃣  Xoá VM (xoá tiến trình + img)"
-    echo -e "${C}════════════════════════════════════${W}"
-    read -rp "👉 Nhập lựa chọn [1-3]: " main_choice
+    # LAUNCH WEBUI by default
+    echo -e "${B}ℹ${W}  Đang khởi động WebUI giao diện quản lý VM..."
+    _webui_start_server || exit 1
+    _webui_wait_loop
+    exit 0
 fi
 # ── Early exit cho case 2 & 3 (tránh build QEMU / cài aria2 không cần thiết) ──
 case "$main_choice" in
