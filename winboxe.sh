@@ -1,43 +1,4 @@
 
-Trò chuyện mới
-Plugin
-Tác vụ theo lịch
-Slide
-Cụm
-Nghiên cứu chuyên sâu
-Tài liệu
-Trang web
-Trang tính
-
-Thu gọn
-Kimi Work
-Kimi Code
-
-Kimi Claw
-
-Các cuộc trò chuyện
-Tất cả trò chuyện
-VPS Web UI脚本
-
-
-Invite to Earn
-Up to 1-year K3 Credits
-
-VPS Web UI脚本
-2
-txt
-#!usrbinenv bash
-
-TXT
-218.54 KB
-code cho t giao diện khi chạy .sh sẽ ra link local bấm vô sẽ là giao diện tạo vps trong giao diện này sẽ có tất cả windows trong tool t gửi bấm vô bất kì bản windows sẽ hiện lên bảng 1 là cấu hình có sẵn tự thêm từ thấp đén cao 2 thêm custom theo ý mình cuối cùng là user và pass trong tool có ấn tạoh bên terminal sẽ chạy lệnh và tạo vps như bình thường
-Sao chép
-Chia sẻ
-Avatar
-Kimi
-Tôi sẽ tạo một giao diện web để quản lý Winbox của bạn. Giao diện này sẽ chạy trên localhost, cho phép bạn chọn Windows, cấu hình VM, và tạo VPS với một cú click
-Tôi đã tạo giao diện web trên. Để chạy được, bạn cần thêm đoạn code sau vào cuối file winbox.sh của bạn. Khi chạy ./winbox.sh --web, nó sẽ mở server local và tự động mở trình duyệt:
-bash
 # ════════════════════════════════════════════════════════════════
 #  WEB UI MODE — giao diện web quản lý VPS
 #  Chạy: bash winbox.sh --web
